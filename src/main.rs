@@ -2,26 +2,15 @@
 /// much like fzf but with the specific purpose to navigate
 /// the filesystem
 use std::error::Error;
-use std::io;
-use std::io::StdoutLock;
-use std::io::{stdin, stdout, Write};
 use std::path::Path;
 
-use termion::raw::IntoRawMode;
-use tui::backend::TermionBackend;
-use tui::layout::{Constraint, Direction, Layout};
-use tui::widgets::{Block, Borders, Widget};
-use tui::Terminal;
+use pancurses::{endwin, initscr, noecho, Input, Window};
 
-fn display_prompt(stdout: &mut StdoutLock, dir: &Path, input: &str) -> Result<(), Box<dyn Error>> {
+fn display_prompt(window: &Window, dir: &Path, input: &str) -> Result<(), Box<dyn Error>> {
     let absolute_path = std::fs::canonicalize(&dir)?;
-    write!(
-        stdout,
-        "{}{}{}",
-        termion::clear::All,
-        termion::cursor::Goto(1, 1),
-        absolute_path.to_string_lossy(),
-    );
+
+    let prompt = format!("{} {}", absolute_path.to_string_lossy(), input);
+    window.mvprintw(0, 0, &prompt);
 
     Ok(())
 }
@@ -31,17 +20,47 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
     // get the current directory
     let mut dir = Path::new(".");
 
-    let stdout = io::stdout().into_raw_mode()?;
-    let backend = TermionBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+    let mut input = String::new();
+
+    // setup the ncurses screen
+    let window = initscr();
+    display_prompt(&window, dir, "")?;
+    window.refresh();
+    window.keypad(true);
+    noecho();
 
     loop {
-        terminal.draw(|f| {
-            let size = f.size();
-            let block = Block::default().title("Block").borders(Borders::ALL);
-            f.render_widget(block, size);
-        });
+        match window.getch() {
+            Some(Input::Character(c)) => {
+                input.push(c);
+                eprintln!("{:?}", input);
+            }
+            Some(Input::KeyDC) => break,
+            Some(Input::KeyBackspace) => {
+                if input.len() < 1 {
+                    input.clear();
+                } else {
+                    input = input.chars().take(input.len() - 1).collect::<String>();
+                }
+
+                eprintln!("{:?}", input);
+                window.clear();
+            }
+            Some(input) => {
+                eprintln!("{:?}", input);
+            }
+            None => (),
+        }
+
+        display_prompt(&window, dir, &input)?;
+        window.refresh();
+
+        // display the current promp
+        // display_prompt(&window, dir, &input)?;
+        // window.refresh();
     }
+
+    endwin();
 
     Ok(())
 }
