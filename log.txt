@@ -1,78 +1,82 @@
-warning: variable does not need to be mutable
-  --> src/main.rs:39:9
+warning: unused import: `std::collections::VecDeque`
+ --> src/main.rs:4:5
+  |
+4 | use std::collections::VecDeque;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unreachable statement
+   --> src/main.rs:101:5
+    |
+87  | /     loop {
+88  | |         tokio::select! {
+89  | |             Ok(res) = reader.next_line() => {
+90  | |                 if let Some(line) = res {
+...   |
+98  | |         window.refresh();
+99  | |     }
+    | |_____- any code following this expression is unreachable
+100 | 
+101 | /     loop {
+102 | |         match window.getch() {
+103 | |             Some(Input::Character(c)) => {
+104 | |                 let found = forbidden_characters.iter().find(|ch| **ch == c);
+...   |
+155 | |         window.refresh();
+156 | |     }
+    | |_____^ unreachable statement
+    |
+    = note: `#[warn(unreachable_code)]` on by default
+
+warning: unused variable: `input`
+  --> src/main.rs:70:9
    |
-39 |     let mut dir = Path::new(".");
+70 |     let mut input = String::new();
+   |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_input`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `forbidden_characters`
+  --> src/main.rs:80:9
+   |
+80 |     let forbidden_characters = vec!['\n', '\t'];
+   |         ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_forbidden_characters`
+
+warning: unused variable: `output`
+  --> src/main.rs:82:9
+   |
+82 |     let output: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+   |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_output`
+
+warning: variable does not need to be mutable
+  --> src/main.rs:67:9
+   |
+67 |     let mut dir = Path::new(".").canonicalize()?;
    |         ----^^^
    |         |
    |         help: remove this `mut`
    |
    = note: `#[warn(unused_mut)]` on by default
 
-warning: function is never used: `get_current_dir`
- --> src/main.rs:9:4
-  |
-9 | fn get_current_dir() {
-  |    ^^^^^^^^^^^^^^^
-  |
-  = note: `#[warn(dead_code)]` on by default
-
-warning: function is never used: `get_ch`
-  --> src/main.rs:13:4
+warning: variable does not need to be mutable
+  --> src/main.rs:70:9
    |
-13 | fn get_ch() {
-   |    ^^^^^^
+70 |     let mut input = String::new();
+   |         ----^^^^^
+   |         |
+   |         help: remove this `mut`
 
-warning: function is never used: `get_matches`
-  --> src/main.rs:17:4
+warning: function is never used: `print_output`
+  --> src/main.rs:53:4
    |
-17 | fn get_matches() {
-   |    ^^^^^^^^^^^
+53 | fn print_output(window: &Window, output: Arc<Mutex<Vec<String>>>) {
+   |    ^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
 
-warning: function is never used: `display_matches`
-  --> src/main.rs:32:4
-   |
-32 | fn display_matches() {
-   |    ^^^^^^^^^^^^^^^
+warning: 8 warnings emitted
 
-warning: unused `std::result::Result` that must be used
-  --> src/main.rs:47:5
-   |
-47 |     display_prompt(&window, &dir, &input);
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-   = note: `#[warn(unused_must_use)]` on by default
-   = note: this `Result` may be an `Err` variant, which should be handled
-
-warning: unused `std::result::Result` that must be used
-  --> src/main.rs:71:9
-   |
-71 |         display_prompt(&window, &dir, &input);
-   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-   = note: this `Result` may be an `Err` variant, which should be handled
-
-warning: 7 warnings emitted
-
-    Finished dev [unoptimized + debuginfo] target(s) in 0.02s
+    Finished dev [unoptimized + debuginfo] target(s) in 0.03s
      Running `target/debug/fdi`
-Some(Character('a'))
-Some(Character('s'))
-Some(Character('d'))
-Some(Character('f'))
-Some(Character('a'))
-Some(Character('s'))
-Some(Character('d'))
-Some(Character('f'))
-Some(Character('a'))
-Some(Character('s'))
-Some(Character('d'))
-Some(Character('f'))
-Some(Character('a'))
-Some(Character('s'))
-Some(Character('d'))
-Some(Character('f'))
-Some(Character('\u{7f}'))
-Some(Character('\u{7f}'))
-Some(Character('\u{7f}'))
-Some(Character('\u{7f}'))
-Some(Character(':'))
+Child status was: exit code: 0
