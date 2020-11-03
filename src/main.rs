@@ -35,8 +35,6 @@ impl OutputLine {
         if let Some((fscore, findices)) = matcher.fuzzy_indices(&data, &match_with) {
             score = fscore;
             indices = findices;
-
-            eprintln!("line -- {}, score: {}", data, score);
         }
 
         OutputLine {
@@ -55,15 +53,11 @@ impl OutputLine {
         self
     }
 
-    pub fn display(
-        &self,
-        stdout: &mut RawTerminal<StdoutLock>,
-        x: u16,
-        y: u16,
-    ) -> Result<(), Box<dyn Error>> {
-        let line = self
+    pub fn display(&self, term_width: usize) -> String {
+        let mut line = self
             .data
             .char_indices()
+            .take(term_width)
             .map(move |(i, ch)| {
                 let found = self.indices.iter().find(|&idx| *idx == i);
 
@@ -77,23 +71,16 @@ impl OutputLine {
             .collect::<Vec<String>>()
             .join("");
 
-        write!(
-            stdout,
-            "{}{}{}",
-            termion::cursor::Goto(x, y),
-            line,
-            color::Fg(color::Reset)
-        )?;
+        line.push('\n');
 
-        Ok(())
+        line
     }
 }
 
 async fn spawn_fd(dir: &PathBuf) -> Result<Lines<BufReader<ChildStdout>>, Box<dyn Error>> {
     let mut cmd = Command::new("fd");
 
-    // TODO: get rid of this when not testing
-    // cmd.arg("-I");
+    cmd.arg("-H");
     cmd.current_dir(dir);
 
     // pipe fd stdout to the programs stdout
@@ -157,7 +144,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut output: Vec<OutputLine> = Vec::new();
     // get the term height so we don't display more
     // output than we need
-    let (_, term_height) = termion::terminal_size()?;
+    let (term_width, term_height) = termion::terminal_size()?;
+    eprintln!("{}, {}", term_width, term_height);
     let output_offset = 3u16;
     // just for knowing what the user has typed
     let mut input = String::new();
@@ -189,10 +177,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             // match on the event sent from stdin
             if let Ok(key) = key {
                 match key {
-                    // break when the 'q' character is pressed
-                    Key::Char('q') => {
-                        break 'main;
-                    }
                     // break when ctrl + c is pressed
                     Key::Ctrl('c') => {
                         break 'main;
@@ -245,9 +229,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         // output the up to the term height of
         // lines from the command output
-        for (i, line) in output.iter().take(term_height as usize).enumerate() {
-            line.display(&mut stdout, 1, i as u16 + output_offset)?;
-        }
+        let cmd_output = output
+            .iter()
+            .take(term_height as usize - (output_offset + 0) as usize)
+            .map(|line| line.display(term_width as usize))
+            .collect::<Vec<String>>()
+            .join("\r");
+
+        write!(
+            stdout,
+            "{}{}{}",
+            termion::cursor::Goto(1, output_offset),
+            cmd_output,
+            color::Fg(color::Reset)
+        )?;
 
         // progress indicator of sorts
         let total = output.len();
@@ -270,7 +265,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         )?;
         stdout.flush()?;
 
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(3));
     }
 
     Ok(())
