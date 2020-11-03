@@ -6,6 +6,8 @@ use std::io::{stdout, StdoutLock, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use fuzzy_matcher::skim::SkimMatcherV2;
@@ -77,34 +79,56 @@ impl OutputLine {
     }
 }
 
-async fn spawn_fd(dir: &PathBuf) -> Result<Lines<BufReader<ChildStdout>>, Box<dyn Error>> {
-    let mut cmd = Command::new("fd");
+async fn spawn_fd(
+    dir: &PathBuf,
+    output: &Arc<Mutex<Vec<OutputLine>>>,
+    pattern: &Arc<Mutex<String>>,
+    matcher: &Arc<Mutex<SkimMatcherV2>>,
+) {
+    let out = Arc::clone(output);
+    let dir = dir.clone();
+    let pattern = Arc::clone(pattern);
+    let matcher = Arc::clone(matcher);
 
-    cmd.arg("-H");
-    cmd.current_dir(dir);
-
-    // pipe fd stdout to the programs stdout
-    cmd.stdout(Stdio::piped());
-
-    let mut child = cmd.spawn().expect("failed to spawn command");
-
-    let stdout = child
-        .stdout
-        .take()
-        .expect("child did not have a handle to stdout");
-
-    let reader = BufReader::new(stdout).lines();
+    {
+        let mut lock = out.lock().expect("Unable to get lock");
+        lock.clear();
+    }
 
     tokio::spawn(async move {
-        let status = child
-            .wait()
-            .await
-            .expect("child process encountered an error");
+        let mut cmd = Command::new("fd");
 
-        eprintln!("child status was: {}", status);
+        cmd.arg("-H");
+        cmd.current_dir(dir);
+
+        // pipe fd stdout to the programs stdout
+        cmd.stdout(Stdio::piped());
+
+        let mut child = cmd.spawn().expect("failed to spawn command");
+
+        let stdout = child
+            .stdout
+            .take()
+            .expect("child did not have a handle to stdout");
+
+        let mut reader = BufReader::new(stdout).lines();
+
+        tokio::spawn(async move {
+            let status = child
+                .wait()
+                .await
+                .expect("child process encountered an error");
+
+            eprintln!("child status was: {}", status);
+        });
+
+        while let Some(line) = reader.next_line().await.expect("Unable to get next line") {
+            let mut out = out.lock().expect("Unable to obtain lock");
+            let pattern = pattern.lock().expect("Unable to obtain lock");
+            let matcher = matcher.lock().expect("Unable to obtain lock");
+            out.push(OutputLine::new(line, &matcher, &pattern));
+        }
     });
-
-    Ok(reader)
 }
 
 fn clear_screen(stdout: &mut RawTerminal<StdoutLock>) -> Result<(), Box<dyn Error>> {
@@ -135,42 +159,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mut dir = Path::new(".").canonicalize()?;
 
+    // we want to record the lines in a vector
+    // so we can do fuzzy searching over it
+    let output: Arc<Mutex<Vec<OutputLine>>> = Arc::new(Mutex::new(Vec::new()));
+    // just for knowing what the user has typed
+    let input = Arc::new(Mutex::new(String::new()));
+    let matcher = Arc::new(Mutex::new(SkimMatcherV2::default()));
     // spawn fd
     // this read will async. read the lines
     // from stdout
-    let mut reader = spawn_fd(&dir).await?;
-    // we want to record the lines in a vector
-    // so we can do fuzzy searching over it
-    let mut output: Vec<OutputLine> = Vec::new();
+    spawn_fd(&dir, &output, &input, &matcher).await;
     // get the term height so we don't display more
     // output than we need
     let (term_width, term_height) = termion::terminal_size()?;
-    eprintln!("{}, {}", term_width, term_height);
     let output_offset = 3u16;
-    // just for knowing what the user has typed
-    let mut input = String::new();
-
-    let matcher = SkimMatcherV2::default();
-
     let exclude_chars = vec!['\n', '\t'];
 
     clear_screen(&mut stdout)?;
 
     'main: loop {
         let key = stdin.next();
-
-        // Select the next line from the fd output
-        // and store it into an output buffer
-        tokio::select! {
-            line = reader.next_line() => {
-                if let Ok(line) = line {
-                    if let Some(line) = line {
-                        output.push(OutputLine::new(line, &matcher, &input));
-                        output.sort_by(|a, b| b.score.cmp(&a.score));
-                    }
-                }
-            }
-        }
 
         // handle the keys
         if let Some(key) = key {
@@ -183,12 +191,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     }
                     // try to change directories on enter
                     Key::Char('\n') => {
-                        if let Ok(input_dir) = dir.join(&input).canonicalize() {
+                        let mut input_l = input.lock().unwrap();
+                        if let Ok(input_dir) = dir.join(&*input_l).canonicalize() {
                             dir = input_dir;
 
-                            input.clear();
-                            output.clear();
-                            reader = spawn_fd(&dir).await?;
+                            input_l.clear();
+                            spawn_fd(&dir, &output, &input, &matcher).await;
 
                             clear_screen(&mut stdout)?;
                         }
@@ -198,6 +206,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         let exclude = exclude_chars.iter().find(|&ex| *ex == ch);
 
                         if exclude.is_none() {
+                            let mut input = input.lock().unwrap();
+                            let mut output = output.lock().unwrap();
+                            let matcher = matcher.lock().unwrap();
+
                             input.push(ch);
                             update_fuzz(&mut output, &matcher, &input);
                             clear_screen(&mut stdout)?;
@@ -205,18 +217,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     }
                     // handle the backspace
                     Key::Backspace => {
-                        if input.len() < 1 {
-                            input.clear();
+                        let mut input_l = input.lock().unwrap();
+                        if input_l.len() < 1 {
+                            input_l.clear();
 
                             // go up to the parent directory
                             if let Some(parent_dir) = dir.parent() {
                                 dir = PathBuf::from(parent_dir);
-                                output.clear();
-                                reader = spawn_fd(&dir).await?;
+                                spawn_fd(&dir, &output, &input, &matcher).await;
                             }
                         } else {
-                            input = input.chars().take(input.len() - 1).collect::<String>();
-                            update_fuzz(&mut output, &matcher, &input);
+                            *input_l = input_l.chars().take(input_l.len() - 1).collect::<String>();
+                            let mut output = output.lock().unwrap();
+                            let matcher = matcher.lock().unwrap();
+
+                            update_fuzz(&mut output, &matcher, &input_l);
                         }
 
                         // Make sure the screen gets a full clear when the backspace happens
@@ -229,40 +244,51 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         // output the up to the term height of
         // lines from the command output
-        let cmd_output = output
-            .iter()
-            .take(term_height as usize - (output_offset + 0) as usize)
-            .map(|line| line.display(term_width as usize))
-            .collect::<Vec<String>>()
-            .join("\r");
+        {
+            let mut output = output.lock().unwrap();
+            let input = input.lock().unwrap();
+            let matcher = matcher.lock().unwrap();
 
-        write!(
-            stdout,
-            "{}{}{}",
-            termion::cursor::Goto(1, output_offset),
-            cmd_output,
-            color::Fg(color::Reset)
-        )?;
+            // update_fuzz(&mut output, &matcher, &input);
 
-        // progress indicator of sorts
-        let total = output.len();
-        let results = output.len();
-        write!(
-            stdout,
-            "{} {}/{}",
-            termion::cursor::Goto(1, 2),
-            results,
-            total
-        )?;
+            let cmd_output = output
+                .iter()
+                .take(term_height as usize - (output_offset + 0) as usize)
+                .map(|line| line.display(term_width as usize))
+                .collect::<Vec<String>>()
+                .join("\r");
+
+            write!(
+                stdout,
+                "{}{}{}",
+                termion::cursor::Goto(1, output_offset),
+                cmd_output,
+                color::Fg(color::Reset)
+            )?;
+
+            // progress indicator of sorts
+            let total = output.len();
+            let results = output.len();
+            write!(
+                stdout,
+                "{} {}/{}",
+                termion::cursor::Goto(1, 2),
+                results,
+                total
+            )?;
+        }
 
         // prompt
-        write!(
-            stdout,
-            "{} > {} {}",
-            termion::cursor::Goto(1, 1),
-            dir.to_string_lossy(),
-            input,
-        )?;
+        {
+            let input = input.lock().unwrap();
+            write!(
+                stdout,
+                "{} > {} {}",
+                termion::cursor::Goto(1, 1),
+                dir.to_string_lossy(),
+                input,
+            )?;
+        }
         stdout.flush()?;
 
         std::thread::sleep(Duration::from_millis(3));
