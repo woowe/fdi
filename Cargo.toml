@@ -11,3 +11,4 @@ pancurses = "0.16"
 tokio = {version = "0.3", features = ["full"] }
 futures = "0.3"
 termion = "1.5"
+fuzzy-matcher = "0.3"
