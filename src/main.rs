@@ -3,8 +3,7 @@
 /// the filesystem
 use std::error::Error;
 use std::io::{stdout, StdoutLock, Write};
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -13,12 +12,9 @@ use fuzzy_matcher::FuzzyMatcher;
 use termion::color;
 use termion::event::Key;
 use termion::input::TermRead;
-use termion::raw::IntoRawMode;
-use termion::raw::RawTerminal;
-use tokio::io::Lines;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::ChildStdout;
-use tokio::process::Command;
+use termion::raw::{IntoRawMode, RawTerminal};
+use tokio::io::{AsyncBufReadExt, BufReader, Lines};
+use tokio::process::{ChildStdout, Command};
 
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
 struct OutputLine {
@@ -54,8 +50,7 @@ impl OutputLine {
     }
 
     pub fn display(&self, term_width: usize) -> String {
-        let mut line = self
-            .data
+        self.data
             .char_indices()
             .take(term_width)
             .map(move |(i, ch)| {
@@ -69,11 +64,7 @@ impl OutputLine {
                 }
             })
             .collect::<Vec<String>>()
-            .join("");
-
-        line.push('\n');
-
-        line
+            .join("")
     }
 }
 
@@ -234,7 +225,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .take(term_height as usize - (output_offset + 0) as usize)
             .map(|line| line.display(term_width as usize))
             .collect::<Vec<String>>()
-            .join("\r");
+            .join("\n\r");
 
         write!(
             stdout,
