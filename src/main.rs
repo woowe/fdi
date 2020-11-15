@@ -144,8 +144,8 @@ fn update_fuzz(output: &mut Vec<OutputLine>, matcher: &SkimMatcherV2, pattern: &
 
 enum AppEvent {
     Quit,
-    Input(String),
-    Dir(String),
+    Input((PathBuf, String)),
+    Dir((PathBuf, String)),
     Sorted(Vec<String>),
     Unknown,
 }
@@ -154,6 +154,9 @@ fn handle_keys(tx: Sender<AppEvent>) {
     let mut stdin = termion::async_stdin().keys();
     let mut input = String::new();
     let mut dir = Path::new(".").canonicalize().unwrap();
+
+    // send the inital data
+    let _ = tx.send(AppEvent::Input((dir.clone(), input.clone())));
 
     loop {
         let key = stdin.next();
@@ -168,16 +171,28 @@ fn handle_keys(tx: Sender<AppEvent>) {
                     }
                     Key::Backspace => {
                         if input.len() < 1 {
+                            if let Some(parent) = dir.parent() {
+                                dir = parent.to_path_buf();
+                                let _ = tx.send(AppEvent::Dir((dir.clone(), input.clone())));
+                            }
                         } else {
-                            input = input.chars().take(input.len() - 1).collect::<String>();
-                            let _ = tx.send(AppEvent::Input(input.clone()));
+                            input = input[0..input.len() - 1].to_string();
+                            let _ = tx.send(AppEvent::Input((dir.clone(), input.clone())));
                         }
                     }
-                    Key::Char('\n') | Key::Char('\t') => {}
+                    Key::Char('\n') | Key::Char('\t') => {
+                        if let Ok(input_dir) = dir.join(&input).canonicalize() {
+                            dir = input_dir;
+
+                            input.clear();
+
+                            let _ = tx.send(AppEvent::Dir((dir.clone(), input.clone())));
+                        }
+                    }
                     Key::Char(ch) => {
                         // dont care about poisoning
                         input.push(ch);
-                        let _ = tx.send(AppEvent::Input(input.clone()));
+                        let _ = tx.send(AppEvent::Input((dir.clone(), input.clone())));
                     }
                     _ => {
                         let _ = tx.send(AppEvent::Unknown);
@@ -196,7 +211,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // spawn fd
     // this read will async. read the lines
     // from stdout
-    let mut reader = spawn_fd(&dir).await?;
+    // let mut reader = spawn_fd(&dir).await?;
     // we want to record the lines in a vector
     // so we can do fuzzy searching over it
     let mut output: Vec<OutputLine> = Vec::new();
@@ -221,7 +236,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
             AppEvent::Quit => {
                 break;
             }
-            AppEvent::Input(input) => {
+            AppEvent::Dir((dir, input)) => {
+                // prompt
+                write!(
+                    stdout,
+                    "{}{} > {} {}",
+                    termion::clear::CurrentLine,
+                    termion::cursor::Goto(1, 1),
+                    dir.to_string_lossy(),
+                    input
+                )?;
+                stdout.flush()?;
+            }
+            AppEvent::Input((dir, input)) => {
                 // prompt
                 write!(
                     stdout,
