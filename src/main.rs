@@ -6,12 +6,16 @@ use std::io::{stdout, StdoutLock, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::spawn;
 use std::time::Duration;
 
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use termion::color;
 use termion::event::Key;
+use termion::input::Keys;
 use termion::input::TermRead;
 use termion::raw::IntoRawMode;
 use termion::raw::RawTerminal;
@@ -19,6 +23,17 @@ use tokio::io::Lines;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::ChildStdout;
 use tokio::process::Command;
+
+//
+// At a high level we want 4 threads
+// 1. the main thread for displaying output
+// 2. one to get the current keys
+// 3. one to run the command
+// 4. one to sort the output of the command
+
+// channel structure:
+// main <- input keys
+//      <- sort output <- command
 
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
 struct OutputLine {
@@ -127,13 +142,56 @@ fn update_fuzz(output: &mut Vec<OutputLine>, matcher: &SkimMatcherV2, pattern: &
     output.sort_by(|a, b| b.score.cmp(&a.score));
 }
 
+enum AppEvent {
+    Quit,
+    Input(String),
+    Dir(String),
+    Sorted(Vec<String>),
+    Unknown,
+}
+
+fn handle_keys(tx: Sender<AppEvent>) {
+    let mut stdin = termion::async_stdin().keys();
+    let mut input = String::new();
+    let mut dir = Path::new(".").canonicalize().unwrap();
+
+    loop {
+        let key = stdin.next();
+
+        // handle the keys
+        if let Some(key) = key {
+            // match on the event sent from stdin
+            if let Ok(key) = key {
+                match key {
+                    Key::Ctrl('c') => {
+                        let _ = tx.send(AppEvent::Quit);
+                    }
+                    Key::Backspace => {
+                        if input.len() < 1 {
+                        } else {
+                            input = input.chars().take(input.len() - 1).collect::<String>();
+                            let _ = tx.send(AppEvent::Input(input.clone()));
+                        }
+                    }
+                    Key::Char('\n') | Key::Char('\t') => {}
+                    Key::Char(ch) => {
+                        // dont care about poisoning
+                        input.push(ch);
+                        let _ = tx.send(AppEvent::Input(input.clone()));
+                    }
+                    _ => {
+                        let _ = tx.send(AppEvent::Unknown);
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let stdout = stdout();
     let mut stdout = stdout.lock().into_raw_mode().unwrap();
-    let mut stdin = termion::async_stdin().keys();
-
-    let mut dir = Path::new(".").canonicalize()?;
 
     // spawn fd
     // this read will async. read the lines
@@ -148,125 +206,148 @@ async fn main() -> Result<(), Box<dyn Error>> {
     eprintln!("{}, {}", term_width, term_height);
     let output_offset = 3u16;
     // just for knowing what the user has typed
-    let mut input = String::new();
-
     let matcher = SkimMatcherV2::default();
-
-    let exclude_chars = vec!['\n', '\t'];
 
     clear_screen(&mut stdout)?;
 
-    'main: loop {
-        let key = stdin.next();
+    let (mut tx, mut rx) = channel();
 
-        // Select the next line from the fd output
-        // and store it into an output buffer
-        tokio::select! {
-            line = reader.next_line() => {
-                if let Ok(line) = line {
-                    if let Some(line) = line {
-                        output.push(OutputLine::new(line, &matcher, &input));
-                        output.sort_by(|a, b| b.score.cmp(&a.score));
-                    }
-                }
+    spawn(move || {
+        handle_keys(tx.clone());
+    });
+
+    for event in rx.iter() {
+        match event {
+            AppEvent::Quit => {
+                break;
+            }
+            AppEvent::Input(input) => {
+                // prompt
+                write!(
+                    stdout,
+                    "{}{} > {} {}",
+                    termion::clear::CurrentLine,
+                    termion::cursor::Goto(1, 1),
+                    dir.to_string_lossy(),
+                    input
+                )?;
+                stdout.flush()?;
+            }
+            _ => {
+                eprintln!("Uknown event");
             }
         }
-
-        // handle the keys
-        if let Some(key) = key {
-            // match on the event sent from stdin
-            if let Ok(key) = key {
-                match key {
-                    // break when ctrl + c is pressed
-                    Key::Ctrl('c') => {
-                        break 'main;
-                    }
-                    // try to change directories on enter
-                    Key::Char('\n') => {
-                        if let Ok(input_dir) = dir.join(&input).canonicalize() {
-                            dir = input_dir;
-
-                            input.clear();
-                            output.clear();
-                            reader = spawn_fd(&dir).await?;
-
-                            clear_screen(&mut stdout)?;
-                        }
-                    }
-                    // handle keyboard input
-                    Key::Char(ch) => {
-                        let exclude = exclude_chars.iter().find(|&ex| *ex == ch);
-
-                        if exclude.is_none() {
-                            input.push(ch);
-                            update_fuzz(&mut output, &matcher, &input);
-                            clear_screen(&mut stdout)?;
-                        }
-                    }
-                    // handle the backspace
-                    Key::Backspace => {
-                        if input.len() < 1 {
-                            input.clear();
-
-                            // go up to the parent directory
-                            if let Some(parent_dir) = dir.parent() {
-                                dir = PathBuf::from(parent_dir);
-                                output.clear();
-                                reader = spawn_fd(&dir).await?;
-                            }
-                        } else {
-                            input = input.chars().take(input.len() - 1).collect::<String>();
-                            update_fuzz(&mut output, &matcher, &input);
-                        }
-
-                        // Make sure the screen gets a full clear when the backspace happens
-                        clear_screen(&mut stdout)?;
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        // output the up to the term height of
-        // lines from the command output
-        let cmd_output = output
-            .iter()
-            .take(term_height as usize - (output_offset + 0) as usize)
-            .map(|line| line.display(term_width as usize))
-            .collect::<Vec<String>>()
-            .join("\r");
-
-        write!(
-            stdout,
-            "{}{}{}",
-            termion::cursor::Goto(1, output_offset),
-            cmd_output,
-            color::Fg(color::Reset)
-        )?;
-
-        // progress indicator of sorts
-        let total = output.len();
-        let results = output.len();
-        write!(
-            stdout,
-            "{} {}/{}",
-            termion::cursor::Goto(1, 2),
-            results,
-            total
-        )?;
-
-        // prompt
-        write!(
-            stdout,
-            "{} > {} {}",
-            termion::cursor::Goto(1, 1),
-            dir.to_string_lossy(),
-            input,
-        )?;
-        stdout.flush()?;
-
-        std::thread::sleep(Duration::from_millis(3));
     }
+
+    // 'main: loop {
+    //     // Select the next line from the fd output
+    //     // and store it into an output buffer
+    //     tokio::select! {
+    //         line = reader.next_line() => {
+    //             if let Ok(line) = line {
+    //                 if let Some(line) = line {
+    //                     output.push(OutputLine::new(line, &matcher, &input));
+    //                     output.sort_by(|a, b| b.score.cmp(&a.score));
+    //                 }
+    //             }
+    //         }
+    //     }
+
+    //     // handle the keys
+    //     if let Some(key) = key {
+    //         // match on the event sent from stdin
+    //         if let Ok(key) = key {
+    //             match key {
+    //                 // break when ctrl + c is pressed
+    //                 Key::Ctrl('c') => {
+    //                     break 'main;
+    //                 }
+    //                 // try to change directories on enter
+    //                 Key::Char('\n') => {
+    //                     if let Ok(input_dir) = dir.join(&input).canonicalize() {
+    //                         dir = input_dir;
+
+    //                         input.clear();
+    //                         output.clear();
+    //                         reader = spawn_fd(&dir).await?;
+
+    //                         clear_screen(&mut stdout)?;
+    //                     }
+    //                 }
+    //                 // handle keyboard input
+    //                 Key::Char(ch) => {
+    //                     let exclude = exclude_chars.iter().find(|&ex| *ex == ch);
+
+    //                     if exclude.is_none() {
+    //                         input.push(ch);
+    //                         update_fuzz(&mut output, &matcher, &input);
+    //                         clear_screen(&mut stdout)?;
+    //                     }
+    //                 }
+    //                 // handle the backspace
+    //                 Key::Backspace => {
+    //                     if input.len() < 1 {
+    //                         input.clear();
+
+    //                         // go up to the parent directory
+    //                         if let Some(parent_dir) = dir.parent() {
+    //                             dir = PathBuf::from(parent_dir);
+    //                             output.clear();
+    //                             reader = spawn_fd(&dir).await?;
+    //                         }
+    //                     } else {
+    //                         input = input.chars().take(input.len() - 1).collect::<String>();
+    //                         update_fuzz(&mut output, &matcher, &input);
+    //                     }
+
+    //                     // Make sure the screen gets a full clear when the backspace happens
+    //                     clear_screen(&mut stdout)?;
+    //                 }
+    //                 _ => {}
+    //             }
+    //         }
+    //     }
+
+    //     // output the up to the term height of
+    //     // lines from the command output
+    //     let cmd_output = output
+    //         .iter()
+    //         .take(term_height as usize - (output_offset + 0) as usize)
+    //         .map(|line| line.display(term_width as usize))
+    //         .collect::<Vec<String>>()
+    //         .join("\r");
+
+    //     write!(
+    //         stdout,
+    //         "{}{}{}",
+    //         termion::cursor::Goto(1, output_offset),
+    //         cmd_output,
+    //         color::Fg(color::Reset)
+    //     )?;
+
+    //     // progress indicator of sorts
+    //     let total = output.len();
+    //     let results = output.len();
+    //     write!(
+    //         stdout,
+    //         "{} {}/{}",
+    //         termion::cursor::Goto(1, 2),
+    //         results,
+    //         total
+    //     )?;
+
+    //     // prompt
+    //     write!(
+    //         stdout,
+    //         "{} > {} {}",
+    //         termion::cursor::Goto(1, 1),
+    //         dir.to_string_lossy(),
+    //         input,
+    //     )?;
+    //     stdout.flush()?;
+
+    //     std::thread::sleep(Duration::from_millis(3));
+    // }
 
     Ok(())
 }
